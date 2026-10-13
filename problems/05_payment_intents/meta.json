@@ -1,0 +1,8 @@
+{
+  "id": "05",
+  "slug": "payment_intents",
+  "title": "Payment Intents",
+  "parts": 4,
+  "function": "processPaymentIntents",
+  "summary": "Drive card payment intents through confirm, capture and cancel from a stream of pipe-delimited key=value commands."
+}

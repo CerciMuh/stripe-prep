@@ -1,0 +1,393 @@
+#!/usr/bin/env python3
+"""stripe-prep drill runner. HackerRank-style OA simulator.
+
+  ./drill list                      problems and your best times
+  ./drill start <id> [--mode oa|screen] [--force]
+  ./drill show                      reprint the unlocked part statements
+  ./drill run [--custom FILE]       Run Code: sample cases of the current part only
+  ./drill submit                    Submit: all hidden cases, parts 1..current, counts only
+  ./drill next [--force]            unlock the next part (current part must be 100%)
+  ./drill status                    time left, splits
+  ./drill clock                     live countdown (run in a second terminal)
+  ./drill end                       stop the drill and log it
+  ./drill history                   past drills
+"""
+import base64, json, os, shutil, subprocess, sys, tempfile, time, zlib
+from datetime import datetime
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+PROBLEMS = ROOT / "problems"
+ATTEMPTS = ROOT / "attempts"
+LOGS = ROOT / "logs"
+STATE = ROOT / ".drill_state.json"
+HISTORY = LOGS / "history.jsonl"
+MODES = {"oa": 60 * 60, "screen": 45 * 60}
+CASE_TIMEOUT = 10  # HackerRank Python limit per test case
+
+
+# ---------- helpers ----------
+
+def die(msg, code=1):
+    print(msg)
+    sys.exit(code)
+
+
+def fmt(secs):
+    secs = int(max(0, secs))
+    return f"{secs // 60:02d}:{secs % 60:02d}"
+
+
+def problem_dirs():
+    if not PROBLEMS.exists():
+        return []
+    return sorted(d for d in PROBLEMS.iterdir() if (d / "meta.json").exists())
+
+
+def find_problem(key):
+    key = key.lower()
+    for d in problem_dirs():
+        meta = json.loads((d / "meta.json").read_text())
+        if key in (meta["id"], meta["id"].lstrip("0"), meta["slug"], d.name):
+            return d, meta
+    die(f"No problem '{key}'. Try ./drill list")
+
+
+def read_vault(pdir):
+    raw = (pdir / ".vault").read_text().splitlines()
+    blob = "".join(line for line in raw if not line.startswith("#"))
+    return json.loads(zlib.decompress(base64.b64decode(blob)))
+
+
+def load_state():
+    if not STATE.exists():
+        return None
+    return json.loads(STATE.read_text())
+
+
+def save_state(st):
+    STATE.write_text(json.dumps(st, indent=2))
+
+
+def need_state():
+    st = load_state()
+    if not st:
+        die("No active drill. Start one: ./drill start <id> [--mode oa|screen]")
+    return st
+
+
+def elapsed(st):
+    return time.time() - st["started"]
+
+
+def remaining(st):
+    return st["duration"] - elapsed(st)
+
+
+def time_line(st):
+    rem = remaining(st)
+    if rem >= 0:
+        return f"Time left: {fmt(rem)}"
+    return f"TIME UP. Over by {fmt(-rem)}"
+
+
+def statement(pdir, vault, part):
+    if part == 1:
+        return (pdir / "part1.md").read_text()
+    return vault["parts"][str(part)]
+
+
+def reveal(st, part, vault, pdir):
+    md = statement(pdir, vault, part)
+    attempt = ROOT / st["attempt"]
+    (attempt / f"part{part}.md").write_text(md)
+    print(md)
+    print(f"\n>> Statement saved to {st['attempt']}/part{part}.md")
+
+
+# ---------- running code ----------
+
+def run_case(solution, case_input):
+    """Run solution.py like HackerRank does. Returns (verdict, stdout_file_text, stderr)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = Path(tmp) / "output.txt"
+        env = dict(os.environ, OUTPUT_PATH=str(out_path), PYTHONHASHSEED="0")
+        try:
+            proc = subprocess.run([sys.executable, str(solution)], input=case_input, env=env,
+                                  capture_output=True, text=True, timeout=CASE_TIMEOUT, cwd=tmp)
+        except subprocess.TimeoutExpired:
+            return "timeout", "", ""
+        got = out_path.read_text() if out_path.exists() else ""
+        if proc.returncode != 0:
+            return "runtime_error", got, proc.stderr
+        return "ok", got, proc.stderr
+
+
+def normalize(text):
+    lines = [line.rstrip() for line in text.split("\n")]
+    while lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def judge(solution, case):
+    verdict, got, err = run_case(solution, case["input"])
+    if verdict == "ok":
+        verdict = "passed" if normalize(got) == normalize(case["output"]) else "wrong_answer"
+    return verdict, got, err
+
+
+# ---------- commands ----------
+
+def cmd_list(args):
+    best = {}
+    if HISTORY.exists():
+        for line in HISTORY.read_text().splitlines():
+            h = json.loads(line)
+            key = h["problem"]
+            score = (h["parts_solved"], -h["total_seconds"])
+            if key not in best or score > best[key][0]:
+                best[key] = (score, h)
+    print(f"{'ID':<4}{'Problem':<28}{'Best':<22}Summary")
+    for d in problem_dirs():
+        meta = json.loads((d / "meta.json").read_text())
+        b = best.get(d.name)
+        bs = f"{b[1]['parts_solved']}/{meta['parts']} in {fmt(b[1]['total_seconds'])}" if b else "-"
+        print(f"{meta['id']:<4}{meta['title']:<28}{bs:<22}{meta['summary']}")
+
+
+def cmd_start(args):
+    force = "--force" in args
+    args = [a for a in args if a != "--force"]
+    mode = "oa"
+    if "--mode" in args:
+        i = args.index("--mode")
+        if i + 1 >= len(args) or args[i + 1] not in MODES:
+            die("--mode must be oa (60 min) or screen (45 min)")
+        mode = args[i + 1]
+        del args[i:i + 2]
+    if len(args) != 1:
+        die("Usage: ./drill start <id> [--mode oa|screen] [--force]")
+    st = load_state()
+    if st and not force:
+        die(f"Drill already active: {st['problem']}. Finish with ./drill end, or pass --force to discard it.")
+    pdir, meta = find_problem(args[0])
+    vault = read_vault(pdir)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    attempt = ATTEMPTS / pdir.name / stamp
+    n = 1
+    while attempt.exists():
+        n += 1
+        attempt = ATTEMPTS / pdir.name / f"{stamp}-{n}"
+    attempt.mkdir(parents=True)
+    shutil.copy(pdir / "solution.py", attempt / "solution.py")
+    now = time.time()
+    st = {"problem": pdir.name, "title": meta["title"], "parts": meta["parts"], "mode": mode,
+          "duration": MODES[mode], "started": now, "attempt": str(attempt.relative_to(ROOT)),
+          "part": 1, "splits": {"1": {"unlocked": now, "solved": None}}, "submits": 0, "last": None}
+    save_state(st)
+    print(f"Drill: {meta['title']} | mode {mode} ({MODES[mode] // 60} min) | {meta['parts']} parts")
+    print(f"Code here: {st['attempt']}/solution.py\n")
+    reveal(st, 1, vault, pdir)
+    print(f"\nClock is running. {time_line(st)}")
+
+
+def cmd_show(args):
+    st = need_state()
+    pdir = PROBLEMS / st["problem"]
+    vault = read_vault(pdir)
+    for p in range(1, st["part"] + 1):
+        print(statement(pdir, vault, p))
+        print()
+    print(time_line(st))
+
+
+def cmd_run(args):
+    st = need_state()
+    pdir = PROBLEMS / st["problem"]
+    solution = ROOT / st["attempt"] / "solution.py"
+    if "--custom" in args:
+        i = args.index("--custom")
+        if i + 1 >= len(args):
+            die("Usage: ./drill run --custom FILE")
+        data = Path(args[i + 1]).read_text()
+        verdict, got, err = run_case(solution, data)
+        print("Your Output (stdout)" if verdict == "ok" else f"Status: {verdict.replace('_', ' ').title()}")
+        print(got.rstrip("\n") or "~ no response on stdout ~")
+        if err.strip():
+            print("\nError (stderr)\n" + err.rstrip())
+        print("\n" + time_line(st))
+        return
+    vault = read_vault(pdir)
+    samples = [c for c in vault["cases"] if c["part"] == st["part"] and c["sample"]]
+    passed = 0
+    for i, case in enumerate(samples):
+        verdict, got, err = judge(solution, case)
+        passed += verdict == "passed"
+        label = {"passed": "Passed", "wrong_answer": "Wrong Answer", "timeout": "Terminated due to timeout",
+                 "runtime_error": "Runtime Error"}[verdict]
+        print(f"=== Sample Test case {i}: {label} ===")
+        if verdict != "passed":
+            print("Input (stdin)\n" + case["input"].rstrip("\n"))
+            print("\nYour Output (stdout)\n" + (got.rstrip("\n") or "~ no response on stdout ~"))
+            print("\nExpected Output\n" + case["output"].rstrip("\n"))
+            if err.strip():
+                print("\nError (stderr)\n" + err.rstrip())
+        print()
+    print(f"Sample cases: {passed}/{len(samples)} passed | {time_line(st)}")
+
+
+def cmd_submit(args, quiet=False):
+    st = need_state()
+    pdir = PROBLEMS / st["problem"]
+    solution = ROOT / st["attempt"] / "solution.py"
+    vault = read_vault(pdir)
+    results = {}
+    for p in range(1, st["part"] + 1):
+        cases = [c for c in vault["cases"] if c["part"] == p]
+        tally = {"passed": 0, "wrong_answer": 0, "runtime_error": 0, "timeout": 0}
+        for case in cases:
+            verdict, _, _ = judge(solution, case)
+            tally[verdict] += 1
+        results[p] = (tally, len(cases))
+    now = time.time()
+    st["submits"] += 1
+    total_pass = sum(t["passed"] for t, _ in results.values())
+    total = sum(n for _, n in results.values())
+    cur_tally, cur_n = results[st["part"]]
+    split = st["splits"][str(st["part"])]
+    if cur_tally["passed"] == cur_n and split["solved"] is None:
+        split["solved"] = now
+    st["last"] = {"at": now, "part": st["part"], "results": {str(p): t for p, (t, _) in results.items()}}
+    save_state(st)
+    if quiet:
+        return results
+    for p, (t, n) in results.items():
+        extra = [f"{t[k]} {k.replace('_', ' ')}" for k in ("wrong_answer", "runtime_error", "timeout") if t[k]]
+        print(f"Part {p}: {t['passed']}/{n} passed" + (f" ({', '.join(extra)})" if extra else ""))
+    print(f"Total: {total_pass}/{total} | Score: {100 * total_pass / total:.1f} | {time_line(st)}")
+    if cur_tally["passed"] == cur_n:
+        if st["part"] < st["parts"]:
+            print(f"Part {st['part']} cleared. ./drill next to unlock Part {st['part'] + 1}.")
+        else:
+            print("All parts cleared. ./drill end to log it.")
+    return results
+
+
+def cmd_next(args):
+    st = need_state()
+    if st["part"] >= st["parts"]:
+        die("Already on the last part. ./drill end when done.")
+    if "--force" not in args:
+        results = cmd_submit([], quiet=True)
+        st = load_state()
+        tally, n = results[st["part"]]
+        if tally["passed"] != n:
+            die(f"Part {st['part']} is at {tally['passed']}/{n}. Clear it first, or ./drill next --force.")
+    now = time.time()
+    st["part"] += 1
+    st["splits"][str(st["part"])] = {"unlocked": now, "solved": None}
+    save_state(st)
+    pdir = PROBLEMS / st["problem"]
+    reveal(st, st["part"], read_vault(pdir), pdir)
+    print(f"\n{time_line(st)}")
+
+
+def split_rows(st, now):
+    rows = []
+    keys = sorted(st["splits"], key=int)
+    for i, k in enumerate(keys):
+        s = st["splits"][k]
+        end = st["splits"][keys[i + 1]]["unlocked"] if i + 1 < len(keys) else now
+        solved = s["solved"]
+        rows.append({"part": int(k), "spent": end - s["unlocked"],
+                     "solved_after": (solved - s["unlocked"]) if solved else None,
+                     "solved_at_elapsed": (solved - st["started"]) if solved else None})
+    return rows
+
+
+def cmd_status(args):
+    st = need_state()
+    now = time.time()
+    print(f"{st['title']} | mode {st['mode']} | Part {st['part']}/{st['parts']} | submits {st['submits']}")
+    print(f"Elapsed {fmt(now - st['started'])} | {time_line(st)}")
+    for r in split_rows(st, now):
+        solved = f"solved after {fmt(r['solved_after'])}" if r["solved_after"] is not None else "not solved"
+        print(f"  Part {r['part']}: {fmt(r['spent'])} spent, {solved}")
+    if st["last"]:
+        res = st["last"]["results"]
+        print("  Last submit: " + ", ".join(f"P{p} {t['passed']}" for p, t in res.items()) + " passed")
+
+
+def cmd_clock(args):
+    st = need_state()
+    warned = set()
+    try:
+        while True:
+            st = load_state()
+            if not st:
+                print("\nDrill ended.")
+                return
+            rem = remaining(st)
+            line = f"\r{st['title']} | Part {st['part']}/{st['parts']} | {time_line(st)}   "
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            for mark in (15 * 60, 5 * 60, 0):
+                if rem <= mark and mark not in warned:
+                    warned.add(mark)
+                    sys.stdout.write("\a")
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print()
+
+
+def cmd_end(args):
+    st = need_state()
+    now = time.time()
+    final = cmd_submit([], quiet=True)
+    st = load_state()
+    rows = split_rows(st, now)
+    solved = sum(1 for r in rows if r["solved_after"] is not None)
+    entry = {"problem": st["problem"], "title": st["title"], "mode": st["mode"],
+             "date": datetime.fromtimestamp(st["started"]).isoformat(timespec="seconds"),
+             "total_seconds": round(now - st["started"]), "limit_seconds": st["duration"],
+             "parts_solved": solved, "parts": st["parts"], "submits": st["submits"],
+             "splits": [{k: (round(v) if isinstance(v, float) else v) for k, v in r.items()} for r in rows],
+             "final": {str(p): {"passed": t["passed"], "total": n} for p, (t, n) in final.items()},
+             "attempt": st["attempt"]}
+    LOGS.mkdir(exist_ok=True)
+    with HISTORY.open("a") as f:
+        f.write(json.dumps(entry) + "\n")
+    STATE.unlink()
+    over = now - st["started"] - st["duration"]
+    print(f"Drill over: {st['title']} ({st['mode']})")
+    print(f"Total {fmt(now - st['started'])}" + (f" (over by {fmt(over)})" if over > 0 else ""))
+    for r in rows:
+        solved = f"solved after {fmt(r['solved_after'])}" if r["solved_after"] is not None else "not solved"
+        print(f"  Part {r['part']}: {fmt(r['spent'])} spent, {solved}")
+    for p, (t, n) in final.items():
+        print(f"  Final Part {p}: {t['passed']}/{n}")
+    print(f"Logged to {HISTORY.relative_to(ROOT)}")
+
+
+def cmd_history(args):
+    if not HISTORY.exists():
+        die("No drills logged yet.")
+    print(f"{'Date':<20}{'Problem':<26}{'Mode':<8}{'Parts':<7}{'Total':<8}Splits (time spent per part)")
+    for line in HISTORY.read_text().splitlines():
+        h = json.loads(line)
+        splits = " ".join(f"P{s['part']}:{fmt(s['spent'])}{'' if s['solved_after'] is not None else '*'}"
+                          for s in h["splits"])
+        print(f"{h['date']:<20}{h['title'][:25]:<26}{h['mode']:<8}{h['parts_solved']}/{h['parts']:<5}"
+              f"{fmt(h['total_seconds']):<8}{splits}")
+    print("* = part not solved")
+
+
+COMMANDS = {"list": cmd_list, "start": cmd_start, "show": cmd_show, "run": cmd_run, "submit": cmd_submit,
+            "next": cmd_next, "status": cmd_status, "clock": cmd_clock, "end": cmd_end, "history": cmd_history}
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
+        print(__doc__)
+        sys.exit(0 if len(sys.argv) < 2 else 2)
+    COMMANDS[sys.argv[1]](sys.argv[2:])

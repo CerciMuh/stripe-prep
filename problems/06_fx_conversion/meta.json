@@ -1,0 +1,8 @@
+{
+  "id": "06",
+  "slug": "fx_conversion",
+  "title": "FX Conversion Service",
+  "parts": 4,
+  "function": "processFxCommands",
+  "summary": "Store currency exchange rates and convert amounts between currencies with exact decimal rounding and strict input validation."
+}

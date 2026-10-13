@@ -1,0 +1,8 @@
+{
+  "id": "10",
+  "slug": "reconciliation",
+  "title": "Invoice Reconciliation",
+  "parts": 4,
+  "function": "reconcileInvoices",
+  "summary": "Parse strict CSV invoice and bank feed records and match incoming bank lines to the invoices they pay."
+}

@@ -1,0 +1,8 @@
+{
+  "id": "02",
+  "slug": "rate_limiter",
+  "title": "API Gateway Rate Limiter",
+  "parts": 4,
+  "function": "rateLimiter",
+  "summary": "Decide ALLOW or DENY for API requests from payment API keys using a fixed-window limit per key, with strict request parsing and path normalization."
+}

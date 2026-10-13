@@ -1,0 +1,8 @@
+{
+  "id": "09",
+  "slug": "payouts",
+  "title": "Merchant Payouts",
+  "parts": 4,
+  "function": "processPayoutCommands",
+  "summary": "Simulate merchant balances: charges with fees settle into an available balance after a delay and can be paid out."
+}

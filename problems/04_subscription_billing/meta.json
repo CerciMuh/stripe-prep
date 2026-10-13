@@ -1,0 +1,8 @@
+{
+  "id": "04",
+  "slug": "subscription_billing",
+  "title": "Subscription Billing",
+  "parts": 4,
+  "function": "processBilling",
+  "summary": "Simulate a subscription billing engine: plans, monthly renewals on calendar anchors, cancellations and invoice runs."
+}

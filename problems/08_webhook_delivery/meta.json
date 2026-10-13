@@ -1,0 +1,8 @@
+{
+  "id": "08",
+  "slug": "webhook_delivery",
+  "title": "Webhook Delivery",
+  "parts": 4,
+  "function": "deliverWebhooks",
+  "summary": "Simulate a webhook dispatcher: endpoints subscribe to event types with wildcard patterns, events fan out to matching endpoints, and a clock tick logs every delivery attempt."
+}

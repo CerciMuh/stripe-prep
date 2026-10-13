@@ -1,0 +1,8 @@
+{
+  "id": "07",
+  "slug": "fraud_rules",
+  "title": "Fraud Rules Engine",
+  "parts": 4,
+  "function": "evaluateTransactions",
+  "summary": "Screen a stream of card transactions against fraud rules and card blocks, approving, declining or flagging each one for review."
+}

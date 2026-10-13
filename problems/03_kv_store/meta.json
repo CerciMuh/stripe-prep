@@ -1,0 +1,8 @@
+{
+  "id": "03",
+  "slug": "kv_store",
+  "title": "Switchboard Config Store",
+  "parts": 4,
+  "function": "runConfigStore",
+  "summary": "Simulate an internal feature-flag key-value store: parse commands with quoted, escaped values and answer GET, COUNT and SCAN queries."
+}
