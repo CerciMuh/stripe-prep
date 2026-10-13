@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """stripe-prep drill runner. HackerRank-style OA simulator.
 
+  ./drill serve [--port 8000]       web UI at http://localhost:8000 (editor, run, submit, timer)
   ./drill list                      problems and your best times
   ./drill start <id> [--mode oa|screen] [--force]
   ./drill show                      reprint the unlocked part statements
@@ -13,6 +14,7 @@
   ./drill history                   past drills
 """
 import base64, json, os, shutil, subprocess, sys, tempfile, time, zlib
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -22,16 +24,18 @@ ATTEMPTS = ROOT / "attempts"
 LOGS = ROOT / "logs"
 STATE = ROOT / ".drill_state.json"
 HISTORY = LOGS / "history.jsonl"
+WEB = ROOT / "web"
 MODES = {"oa": 60 * 60, "screen": 45 * 60}
 CASE_TIMEOUT = 10  # HackerRank Python limit per test case
+VERDICTS = {"passed": "Passed", "wrong_answer": "Wrong Answer", "timeout": "Terminated due to timeout",
+            "runtime_error": "Runtime Error"}
+
+
+class DrillError(Exception):
+    pass
 
 
 # ---------- helpers ----------
-
-def die(msg, code=1):
-    print(msg)
-    sys.exit(code)
-
 
 def fmt(secs):
     secs = int(max(0, secs))
@@ -50,7 +54,7 @@ def find_problem(key):
         meta = json.loads((d / "meta.json").read_text())
         if key in (meta["id"], meta["id"].lstrip("0"), meta["slug"], d.name):
             return d, meta
-    die(f"No problem '{key}'. Try ./drill list")
+    raise DrillError(f"No problem '{key}'. Try ./drill list")
 
 
 def read_vault(pdir):
@@ -72,23 +76,17 @@ def save_state(st):
 def need_state():
     st = load_state()
     if not st:
-        die("No active drill. Start one: ./drill start <id> [--mode oa|screen]")
+        raise DrillError("No active drill. Start one: ./drill start <id> [--mode oa|screen]")
     return st
 
 
-def elapsed(st):
-    return time.time() - st["started"]
-
-
 def remaining(st):
-    return st["duration"] - elapsed(st)
+    return st["duration"] - (time.time() - st["started"])
 
 
 def time_line(st):
     rem = remaining(st)
-    if rem >= 0:
-        return f"Time left: {fmt(rem)}"
-    return f"TIME UP. Over by {fmt(-rem)}"
+    return f"Time left: {fmt(rem)}" if rem >= 0 else f"TIME UP. Over by {fmt(-rem)}"
 
 
 def statement(pdir, vault, part):
@@ -97,18 +95,14 @@ def statement(pdir, vault, part):
     return vault["parts"][str(part)]
 
 
-def reveal(st, part, vault, pdir):
-    md = statement(pdir, vault, part)
-    attempt = ROOT / st["attempt"]
-    (attempt / f"part{part}.md").write_text(md)
-    print(md)
-    print(f"\n>> Statement saved to {st['attempt']}/part{part}.md")
+def solution_path(st):
+    return ROOT / st["attempt"] / "solution.py"
 
 
 # ---------- running code ----------
 
 def run_case(solution, case_input):
-    """Run solution.py like HackerRank does. Returns (verdict, stdout_file_text, stderr)."""
+    """Run solution.py like HackerRank does. Returns (verdict, output_file_text, stderr)."""
     with tempfile.TemporaryDirectory() as tmp:
         out_path = Path(tmp) / "output.txt"
         env = dict(os.environ, OUTPUT_PATH=str(out_path), PYTHONHASHSEED="0")
@@ -137,160 +131,122 @@ def judge(solution, case):
     return verdict, got, err
 
 
-# ---------- commands ----------
+# ---------- core actions (shared by CLI and web) ----------
 
-def cmd_list(args):
+def best_times():
     best = {}
     if HISTORY.exists():
         for line in HISTORY.read_text().splitlines():
             h = json.loads(line)
-            key = h["problem"]
             score = (h["parts_solved"], -h["total_seconds"])
-            if key not in best or score > best[key][0]:
-                best[key] = (score, h)
-    print(f"{'ID':<4}{'Problem':<28}{'Best':<22}Summary")
+            if h["problem"] not in best or score > best[h["problem"]][0]:
+                best[h["problem"]] = (score, h)
+    return {k: v[1] for k, v in best.items()}
+
+
+def list_problems():
+    best = best_times()
+    out = []
     for d in problem_dirs():
         meta = json.loads((d / "meta.json").read_text())
         b = best.get(d.name)
-        bs = f"{b[1]['parts_solved']}/{meta['parts']} in {fmt(b[1]['total_seconds'])}" if b else "-"
-        print(f"{meta['id']:<4}{meta['title']:<28}{bs:<22}{meta['summary']}")
+        out.append({**meta, "dir": d.name,
+                    "best": f"{b['parts_solved']}/{meta['parts']} in {fmt(b['total_seconds'])}" if b else None})
+    return out
 
 
-def cmd_start(args):
-    force = "--force" in args
-    args = [a for a in args if a != "--force"]
-    mode = "oa"
-    if "--mode" in args:
-        i = args.index("--mode")
-        if i + 1 >= len(args) or args[i + 1] not in MODES:
-            die("--mode must be oa (60 min) or screen (45 min)")
-        mode = args[i + 1]
-        del args[i:i + 2]
-    if len(args) != 1:
-        die("Usage: ./drill start <id> [--mode oa|screen] [--force]")
+def start_drill(key, mode="oa", force=False):
+    if mode not in MODES:
+        raise DrillError("mode must be oa (60 min) or screen (45 min)")
     st = load_state()
     if st and not force:
-        die(f"Drill already active: {st['problem']}. Finish with ./drill end, or pass --force to discard it.")
-    pdir, meta = find_problem(args[0])
+        raise DrillError(f"Drill already active: {st['title']}. End it first, or force-start to discard it.")
+    pdir, meta = find_problem(key)
     vault = read_vault(pdir)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    attempt = ATTEMPTS / pdir.name / stamp
-    n = 1
+    attempt, n = ATTEMPTS / pdir.name / stamp, 1
     while attempt.exists():
         n += 1
         attempt = ATTEMPTS / pdir.name / f"{stamp}-{n}"
     attempt.mkdir(parents=True)
     shutil.copy(pdir / "solution.py", attempt / "solution.py")
+    (attempt / "part1.md").write_text(statement(pdir, vault, 1))
     now = time.time()
     st = {"problem": pdir.name, "title": meta["title"], "parts": meta["parts"], "mode": mode,
           "duration": MODES[mode], "started": now, "attempt": str(attempt.relative_to(ROOT)),
           "part": 1, "splits": {"1": {"unlocked": now, "solved": None}}, "submits": 0, "last": None}
     save_state(st)
-    print(f"Drill: {meta['title']} | mode {mode} ({MODES[mode] // 60} min) | {meta['parts']} parts")
-    print(f"Code here: {st['attempt']}/solution.py\n")
-    reveal(st, 1, vault, pdir)
-    print(f"\nClock is running. {time_line(st)}")
+    return st
 
 
-def cmd_show(args):
-    st = need_state()
+def unlocked_statements(st):
     pdir = PROBLEMS / st["problem"]
     vault = read_vault(pdir)
-    for p in range(1, st["part"] + 1):
-        print(statement(pdir, vault, p))
-        print()
-    print(time_line(st))
+    return [statement(pdir, vault, p) for p in range(1, st["part"] + 1)]
 
 
-def cmd_run(args):
-    st = need_state()
-    pdir = PROBLEMS / st["problem"]
-    solution = ROOT / st["attempt"] / "solution.py"
-    if "--custom" in args:
-        i = args.index("--custom")
-        if i + 1 >= len(args):
-            die("Usage: ./drill run --custom FILE")
-        data = Path(args[i + 1]).read_text()
-        verdict, got, err = run_case(solution, data)
-        print("Your Output (stdout)" if verdict == "ok" else f"Status: {verdict.replace('_', ' ').title()}")
-        print(got.rstrip("\n") or "~ no response on stdout ~")
-        if err.strip():
-            print("\nError (stderr)\n" + err.rstrip())
-        print("\n" + time_line(st))
-        return
-    vault = read_vault(pdir)
+def run_samples(st):
+    vault = read_vault(PROBLEMS / st["problem"])
     samples = [c for c in vault["cases"] if c["part"] == st["part"] and c["sample"]]
-    passed = 0
-    for i, case in enumerate(samples):
-        verdict, got, err = judge(solution, case)
-        passed += verdict == "passed"
-        label = {"passed": "Passed", "wrong_answer": "Wrong Answer", "timeout": "Terminated due to timeout",
-                 "runtime_error": "Runtime Error"}[verdict]
-        print(f"=== Sample Test case {i}: {label} ===")
-        if verdict != "passed":
-            print("Input (stdin)\n" + case["input"].rstrip("\n"))
-            print("\nYour Output (stdout)\n" + (got.rstrip("\n") or "~ no response on stdout ~"))
-            print("\nExpected Output\n" + case["output"].rstrip("\n"))
-            if err.strip():
-                print("\nError (stderr)\n" + err.rstrip())
-        print()
-    print(f"Sample cases: {passed}/{len(samples)} passed | {time_line(st)}")
+    sol = solution_path(st)
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        verdicts = list(ex.map(lambda c: judge(sol, c), samples))
+    return [{"index": i, "verdict": v, "input": c["input"], "output": got, "expected": c["output"], "stderr": err}
+            for i, (c, (v, got, err)) in enumerate(zip(samples, verdicts))]
 
 
-def cmd_submit(args, quiet=False):
-    st = need_state()
-    pdir = PROBLEMS / st["problem"]
-    solution = ROOT / st["attempt"] / "solution.py"
-    vault = read_vault(pdir)
-    results = {}
-    for p in range(1, st["part"] + 1):
-        cases = [c for c in vault["cases"] if c["part"] == p]
-        tally = {"passed": 0, "wrong_answer": 0, "runtime_error": 0, "timeout": 0}
-        for case in cases:
-            verdict, _, _ = judge(solution, case)
-            tally[verdict] += 1
-        results[p] = (tally, len(cases))
+def run_custom(st, text):
+    verdict, got, err = run_case(solution_path(st), text)
+    return {"verdict": verdict, "output": got, "stderr": err}
+
+
+def submit_all(st):
+    """Run hidden cases for parts 1..current. Returns {part: (tally, total)} and updates state."""
+    vault = read_vault(PROBLEMS / st["problem"])
+    sol = solution_path(st)
+    cases = [c for c in vault["cases"] if c["part"] <= st["part"]]
+    with ThreadPoolExecutor(max_workers=max(2, min(8, (os.cpu_count() or 4)))) as ex:
+        verdicts = list(ex.map(lambda c: judge(sol, c)[0], cases))
+    results = {p: ({"passed": 0, "wrong_answer": 0, "runtime_error": 0, "timeout": 0}, 0)
+               for p in range(1, st["part"] + 1)}
+    for c, v in zip(cases, verdicts):
+        tally, n = results[c["part"]]
+        tally[v] += 1
+        results[c["part"]] = (tally, n + 1)
     now = time.time()
     st["submits"] += 1
-    total_pass = sum(t["passed"] for t, _ in results.values())
-    total = sum(n for _, n in results.values())
     cur_tally, cur_n = results[st["part"]]
     split = st["splits"][str(st["part"])]
     if cur_tally["passed"] == cur_n and split["solved"] is None:
         split["solved"] = now
     st["last"] = {"at": now, "part": st["part"], "results": {str(p): t for p, (t, _) in results.items()}}
     save_state(st)
-    if quiet:
-        return results
-    for p, (t, n) in results.items():
-        extra = [f"{t[k]} {k.replace('_', ' ')}" for k in ("wrong_answer", "runtime_error", "timeout") if t[k]]
-        print(f"Part {p}: {t['passed']}/{n} passed" + (f" ({', '.join(extra)})" if extra else ""))
-    print(f"Total: {total_pass}/{total} | Score: {100 * total_pass / total:.1f} | {time_line(st)}")
-    if cur_tally["passed"] == cur_n:
-        if st["part"] < st["parts"]:
-            print(f"Part {st['part']} cleared. ./drill next to unlock Part {st['part'] + 1}.")
-        else:
-            print("All parts cleared. ./drill end to log it.")
     return results
 
 
-def cmd_next(args):
+def part_cleared(results, part):
+    tally, n = results[part]
+    return tally["passed"] == n
+
+
+def unlock_next(force=False):
     st = need_state()
     if st["part"] >= st["parts"]:
-        die("Already on the last part. ./drill end when done.")
-    if "--force" not in args:
-        results = cmd_submit([], quiet=True)
+        raise DrillError("Already on the last part.")
+    if not force:
+        results = submit_all(st)
         st = load_state()
         tally, n = results[st["part"]]
         if tally["passed"] != n:
-            die(f"Part {st['part']} is at {tally['passed']}/{n}. Clear it first, or ./drill next --force.")
+            raise DrillError(f"Part {st['part']} is at {tally['passed']}/{n}. Clear it first, or force it.")
     now = time.time()
     st["part"] += 1
     st["splits"][str(st["part"])] = {"unlocked": now, "solved": None}
     save_state(st)
     pdir = PROBLEMS / st["problem"]
-    reveal(st, st["part"], read_vault(pdir), pdir)
-    print(f"\n{time_line(st)}")
+    md = statement(pdir, read_vault(pdir), st["part"])
+    (ROOT / st["attempt"] / f"part{st['part']}.md").write_text(md)
+    return st, md
 
 
 def split_rows(st, now):
@@ -304,6 +260,118 @@ def split_rows(st, now):
                      "solved_after": (solved - s["unlocked"]) if solved else None,
                      "solved_at_elapsed": (solved - st["started"]) if solved else None})
     return rows
+
+
+def end_drill():
+    st = need_state()
+    now = time.time()
+    final = submit_all(st)
+    st = load_state()
+    rows = split_rows(st, now)
+    solved = sum(1 for r in rows if r["solved_after"] is not None)
+    entry = {"problem": st["problem"], "title": st["title"], "mode": st["mode"],
+             "date": datetime.fromtimestamp(st["started"]).isoformat(timespec="seconds"),
+             "total_seconds": round(now - st["started"]), "limit_seconds": st["duration"],
+             "parts_solved": solved, "parts": st["parts"], "submits": st["submits"],
+             "splits": [{k: (round(v) if isinstance(v, float) else v) for k, v in r.items()} for r in rows],
+             "final": {str(p): {"passed": t["passed"], "total": n} for p, (t, n) in final.items()},
+             "attempt": st["attempt"]}
+    LOGS.mkdir(exist_ok=True)
+    with HISTORY.open("a") as f:
+        f.write(json.dumps(entry) + "\n")
+    STATE.unlink()
+    return entry
+
+
+def read_history():
+    if not HISTORY.exists():
+        return []
+    return [json.loads(line) for line in HISTORY.read_text().splitlines() if line.strip()]
+
+
+# ---------- CLI ----------
+
+def cmd_list(args):
+    print(f"{'ID':<4}{'Problem':<28}{'Best':<22}Summary")
+    for p in list_problems():
+        print(f"{p['id']:<4}{p['title']:<28}{p['best'] or '-':<22}{p['summary']}")
+
+
+def cmd_start(args):
+    force = "--force" in args
+    args = [a for a in args if a != "--force"]
+    mode = "oa"
+    if "--mode" in args:
+        i = args.index("--mode")
+        if i + 1 >= len(args):
+            raise DrillError("--mode must be oa (60 min) or screen (45 min)")
+        mode = args[i + 1]
+        del args[i:i + 2]
+    if len(args) != 1:
+        raise DrillError("Usage: ./drill start <id> [--mode oa|screen] [--force]")
+    st = start_drill(args[0], mode, force)
+    print(f"Drill: {st['title']} | mode {mode} ({MODES[mode] // 60} min) | {st['parts']} parts")
+    print(f"Code here: {st['attempt']}/solution.py   (or use ./drill serve)\n")
+    print(unlocked_statements(st)[0])
+    print(f"\n>> Statement saved to {st['attempt']}/part1.md")
+    print(f"\nClock is running. {time_line(st)}")
+
+
+def cmd_show(args):
+    st = need_state()
+    for md in unlocked_statements(st):
+        print(md + "\n")
+    print(time_line(st))
+
+
+def cmd_run(args):
+    st = need_state()
+    if "--custom" in args:
+        i = args.index("--custom")
+        if i + 1 >= len(args):
+            raise DrillError("Usage: ./drill run --custom FILE")
+        r = run_custom(st, Path(args[i + 1]).read_text())
+        print("Your Output (stdout)" if r["verdict"] == "ok" else f"Status: {VERDICTS[r['verdict']]}")
+        print(r["output"].rstrip("\n") or "~ no response on stdout ~")
+        if r["stderr"].strip():
+            print("\nError (stderr)\n" + r["stderr"].rstrip())
+        print("\n" + time_line(st))
+        return
+    results = run_samples(st)
+    for r in results:
+        print(f"=== Sample Test case {r['index']}: {VERDICTS[r['verdict']]} ===")
+        if r["verdict"] != "passed":
+            print("Input (stdin)\n" + r["input"].rstrip("\n"))
+            print("\nYour Output (stdout)\n" + (r["output"].rstrip("\n") or "~ no response on stdout ~"))
+            print("\nExpected Output\n" + r["expected"].rstrip("\n"))
+            if r["stderr"].strip():
+                print("\nError (stderr)\n" + r["stderr"].rstrip())
+        print()
+    passed = sum(r["verdict"] == "passed" for r in results)
+    print(f"Sample cases: {passed}/{len(results)} passed | {time_line(st)}")
+
+
+def cmd_submit(args):
+    st = need_state()
+    results = submit_all(st)
+    total_pass = sum(t["passed"] for t, _ in results.values())
+    total = sum(n for _, n in results.values())
+    for p, (t, n) in results.items():
+        extra = [f"{t[k]} {k.replace('_', ' ')}" for k in ("wrong_answer", "runtime_error", "timeout") if t[k]]
+        print(f"Part {p}: {t['passed']}/{n} passed" + (f" ({', '.join(extra)})" if extra else ""))
+    print(f"Total: {total_pass}/{total} | Score: {100 * total_pass / total:.1f} | {time_line(st)}")
+    if part_cleared(results, st["part"]):
+        if st["part"] < st["parts"]:
+            print(f"Part {st['part']} cleared. ./drill next to unlock Part {st['part'] + 1}.")
+        else:
+            print("All parts cleared. ./drill end to log it.")
+
+
+def cmd_next(args):
+    st, md = unlock_next("--force" in args)
+    print(md)
+    print(f"\n>> Statement saved to {st['attempt']}/part{st['part']}.md")
+    print(f"\n{time_line(st)}")
 
 
 def cmd_status(args):
@@ -320,7 +388,7 @@ def cmd_status(args):
 
 
 def cmd_clock(args):
-    st = need_state()
+    need_state()
     warned = set()
     try:
         while True:
@@ -329,8 +397,7 @@ def cmd_clock(args):
                 print("\nDrill ended.")
                 return
             rem = remaining(st)
-            line = f"\r{st['title']} | Part {st['part']}/{st['parts']} | {time_line(st)}   "
-            sys.stdout.write(line)
+            sys.stdout.write(f"\r{st['title']} | Part {st['part']}/{st['parts']} | {time_line(st)}   ")
             sys.stdout.flush()
             for mark in (15 * 60, 5 * 60, 0):
                 if rem <= mark and mark not in warned:
@@ -342,40 +409,24 @@ def cmd_clock(args):
 
 
 def cmd_end(args):
-    st = need_state()
-    now = time.time()
-    final = cmd_submit([], quiet=True)
-    st = load_state()
-    rows = split_rows(st, now)
-    solved = sum(1 for r in rows if r["solved_after"] is not None)
-    entry = {"problem": st["problem"], "title": st["title"], "mode": st["mode"],
-             "date": datetime.fromtimestamp(st["started"]).isoformat(timespec="seconds"),
-             "total_seconds": round(now - st["started"]), "limit_seconds": st["duration"],
-             "parts_solved": solved, "parts": st["parts"], "submits": st["submits"],
-             "splits": [{k: (round(v) if isinstance(v, float) else v) for k, v in r.items()} for r in rows],
-             "final": {str(p): {"passed": t["passed"], "total": n} for p, (t, n) in final.items()},
-             "attempt": st["attempt"]}
-    LOGS.mkdir(exist_ok=True)
-    with HISTORY.open("a") as f:
-        f.write(json.dumps(entry) + "\n")
-    STATE.unlink()
-    over = now - st["started"] - st["duration"]
-    print(f"Drill over: {st['title']} ({st['mode']})")
-    print(f"Total {fmt(now - st['started'])}" + (f" (over by {fmt(over)})" if over > 0 else ""))
-    for r in rows:
+    e = end_drill()
+    over = e["total_seconds"] - e["limit_seconds"]
+    print(f"Drill over: {e['title']} ({e['mode']})")
+    print(f"Total {fmt(e['total_seconds'])}" + (f" (over by {fmt(over)})" if over > 0 else ""))
+    for r in e["splits"]:
         solved = f"solved after {fmt(r['solved_after'])}" if r["solved_after"] is not None else "not solved"
         print(f"  Part {r['part']}: {fmt(r['spent'])} spent, {solved}")
-    for p, (t, n) in final.items():
-        print(f"  Final Part {p}: {t['passed']}/{n}")
+    for p, f in e["final"].items():
+        print(f"  Final Part {p}: {f['passed']}/{f['total']}")
     print(f"Logged to {HISTORY.relative_to(ROOT)}")
 
 
 def cmd_history(args):
-    if not HISTORY.exists():
-        die("No drills logged yet.")
+    hist = read_history()
+    if not hist:
+        raise DrillError("No drills logged yet.")
     print(f"{'Date':<20}{'Problem':<26}{'Mode':<8}{'Parts':<7}{'Total':<8}Splits (time spent per part)")
-    for line in HISTORY.read_text().splitlines():
-        h = json.loads(line)
+    for h in hist:
         splits = " ".join(f"P{s['part']}:{fmt(s['spent'])}{'' if s['solved_after'] is not None else '*'}"
                           for s in h["splits"])
         print(f"{h['date']:<20}{h['title'][:25]:<26}{h['mode']:<8}{h['parts_solved']}/{h['parts']:<5}"
@@ -383,11 +434,132 @@ def cmd_history(args):
     print("* = part not solved")
 
 
+# ---------- web UI ----------
+
+def state_payload():
+    st = load_state()
+    if not st:
+        return {"active": False}
+    sol = solution_path(st)
+    return {"active": True, "title": st["title"], "problem": st["problem"], "mode": st["mode"],
+            "part": st["part"], "parts": st["parts"], "deadline": st["started"] + st["duration"],
+            "started": st["started"], "now": time.time(), "attempt": st["attempt"],
+            "statements": unlocked_statements(st), "code": sol.read_text(), "mtime": sol.stat().st_mtime,
+            "splits": split_rows(st, time.time()), "last": st["last"]}
+
+
+def save_code(st, body):
+    sol = solution_path(st)
+    if "code" not in body:
+        return
+    base = body.get("mtime")
+    if base is not None and abs(sol.stat().st_mtime - base) > 1e-6 and not body.get("overwrite"):
+        raise DrillError("CONFLICT: solution.py changed on disk since the editor loaded it.")
+    sol.write_text(body["code"])
+
+
+def handle_api(path, body):
+    if path == "/api/problems":
+        return {"problems": list_problems()}
+    if path == "/api/state":
+        return state_payload()
+    if path == "/api/history":
+        return {"history": read_history()}
+    if path == "/api/start":
+        start_drill(str(body.get("id", "")), body.get("mode", "oa"), bool(body.get("force")))
+        return state_payload()
+    st = need_state()
+    if path == "/api/save":
+        save_code(st, body)
+        return {"mtime": solution_path(st).stat().st_mtime}
+    if path == "/api/run":
+        save_code(st, body)
+        mtime = solution_path(st).stat().st_mtime
+        if body.get("custom") is not None:
+            return {"custom": run_custom(st, body["custom"]), "mtime": mtime}
+        return {"samples": run_samples(st), "mtime": mtime}
+    if path == "/api/submit":
+        save_code(st, body)
+        results = submit_all(st)
+        return {"results": {str(p): {**t, "total": n} for p, (t, n) in results.items()},
+                "cleared": part_cleared(results, st["part"]), "part": st["part"], "parts": st["parts"],
+                "mtime": solution_path(st).stat().st_mtime}
+    if path == "/api/next":
+        save_code(st, body)
+        unlock_next(bool(body.get("force")))
+        return state_payload()
+    if path == "/api/end":
+        save_code(st, body)
+        return {"entry": end_drill()}
+    raise DrillError(f"Unknown endpoint {path}")
+
+
+def cmd_serve(args):
+    import webbrowser
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    port = 8000
+    if "--port" in args:
+        port = int(args[args.index("--port") + 1])
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def send(self, code, data, ctype="application/json"):
+            raw = data if isinstance(data, bytes) else json.dumps(data).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def dispatch(self, body):
+            path = self.path.split("?")[0]
+            if not path.startswith("/api/"):
+                if path in ("/", "/index.html"):
+                    return self.send(200, (WEB / "index.html").read_bytes(), "text/html; charset=utf-8")
+                return self.send(404, {"error": "not found"})
+            try:
+                self.send(200, handle_api(path, body))
+            except DrillError as e:
+                self.send(409 if str(e).startswith("CONFLICT") else 400, {"error": str(e)})
+            except Exception as e:  # keep the server alive, surface the problem
+                self.send(500, {"error": f"{type(e).__name__}: {e}"})
+
+        def do_GET(self):
+            self.dispatch({})
+
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(n) or b"{}")
+            except json.JSONDecodeError:
+                return self.send(400, {"error": "bad json"})
+            self.dispatch(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    url = f"http://localhost:{port}"
+    print(f"stripe-prep UI on {url}  (Ctrl+C to stop; the drill clock keeps running)")
+    if "--no-open" not in args:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print()
+
+
 COMMANDS = {"list": cmd_list, "start": cmd_start, "show": cmd_show, "run": cmd_run, "submit": cmd_submit,
-            "next": cmd_next, "status": cmd_status, "clock": cmd_clock, "end": cmd_end, "history": cmd_history}
+            "next": cmd_next, "status": cmd_status, "clock": cmd_clock, "end": cmd_end, "history": cmd_history,
+            "serve": cmd_serve}
 
 if __name__ == "__main__":
     if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
         print(__doc__)
         sys.exit(0 if len(sys.argv) < 2 else 2)
-    COMMANDS[sys.argv[1]](sys.argv[2:])
+    try:
+        COMMANDS[sys.argv[1]](sys.argv[2:])
+    except DrillError as e:
+        print(e)
+        sys.exit(1)

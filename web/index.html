@@ -1,0 +1,588 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>stripe-prep</title>
+<link rel="preconnect" href="https://cdn.jsdelivr.net">
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<style>
+  :root {
+    --nav: #0e141e; --nav-2: #1a2230; --nav-text: #c2c7d0;
+    --bg: #f3f7f7; --panel: #ffffff; --line: #e1e5ea; --text: #0e141e; --muted: #576871;
+    --green: #1ba94c; --green-h: #158a3e; --red: #d9435c; --amber: #e6a23c; --blue: #1f6feb;
+    --code-bg: #f6f8fa; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; flex-direction: column; }
+  button { font: inherit; cursor: pointer; border-radius: 4px; border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 7px 16px; }
+  button:disabled { opacity: .55; cursor: default; }
+  button.primary { background: var(--green); border-color: var(--green); color: #fff; font-weight: 600; }
+  button.primary:hover:not(:disabled) { background: var(--green-h); }
+  button.ghost { background: transparent; color: var(--nav-text); border-color: #3a4556; }
+  button.ghost:hover { color: #fff; border-color: #6b7789; }
+  button.danger { color: var(--red); border-color: var(--red); background: transparent; }
+
+  /* top bar */
+  header { background: var(--nav); color: #fff; height: 52px; display: flex; align-items: center; gap: 18px; padding: 0 16px; flex: none; }
+  .logo { font-weight: 700; letter-spacing: .2px; color: #fff; }
+  .logo b { color: var(--green); }
+  .crumb { color: var(--nav-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .crumb strong { color: #fff; font-weight: 600; }
+  .spacer { flex: 1; }
+  .parts { display: flex; gap: 6px; }
+  .pill { font-size: 12px; padding: 3px 10px; border-radius: 12px; background: var(--nav-2); color: var(--nav-text); border: 1px solid #2c3646; }
+  .pill.cur { background: #fff; color: var(--nav); border-color: #fff; font-weight: 600; }
+  .pill.done { background: rgba(27,169,76,.18); color: #6fdc96; border-color: rgba(27,169,76,.5); }
+  .pill.locked { opacity: .5; }
+  .timer { font-family: var(--mono); font-size: 18px; font-weight: 600; padding: 4px 12px; border-radius: 4px; background: var(--nav-2); min-width: 92px; text-align: center; }
+  .timer.warn { color: var(--amber); }
+  .timer.crit { color: #fff; background: var(--red); }
+  .timer.over { color: #fff; background: var(--red); animation: blink 1s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: .55; } }
+
+  /* home */
+  #home { flex: 1; overflow: auto; padding: 28px 16px 60px; }
+  .wrap { max-width: 980px; margin: 0 auto; }
+  h1.page { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 22px; }
+  .modes { display: flex; gap: 8px; margin-bottom: 18px; flex-wrap: wrap; }
+  .mode { border: 1px solid var(--line); background: var(--panel); padding: 10px 14px; border-radius: 6px; cursor: pointer; }
+  .mode.sel { border-color: var(--green); box-shadow: 0 0 0 1px var(--green) inset; }
+  .mode b { display: block; }
+  .mode span { color: var(--muted); font-size: 12px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; }
+  .card .id { font-family: var(--mono); color: var(--muted); font-size: 12px; }
+  .card h3 { margin: 0; font-size: 16px; }
+  .card p { margin: 0; color: var(--muted); font-size: 13px; flex: 1; }
+  .card .row { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; }
+  .best { font-size: 12px; color: var(--muted); }
+  .best.has { color: var(--green-h); font-weight: 600; }
+  h2.sec { font-size: 16px; margin: 34px 0 10px; }
+  table.hist { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); font-size: 13px; }
+  table.hist th, table.hist td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  table.hist th { color: var(--muted); font-weight: 600; background: #fafbfc; }
+  .tablewrap { overflow-x: auto; }
+
+  /* drill */
+  #drill { flex: 1; display: none; min-height: 0; }
+  #left { background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-width: 280px; width: 42%; }
+  #divider { width: 6px; cursor: col-resize; background: var(--bg); flex: none; }
+  #divider:hover { background: #d5dbe1; }
+  #right { flex: 1; display: flex; flex-direction: column; min-width: 320px; }
+  .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--line); background: #fafbfc; flex: none; overflow-x: auto; }
+  .tab { padding: 10px 16px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; white-space: nowrap; user-select: none; }
+  .tab.on { color: var(--text); border-bottom-color: var(--green); font-weight: 600; background: var(--panel); }
+  #statement { flex: 1; overflow: auto; padding: 18px 24px 60px; }
+  .md h1 { font-size: 20px; margin: 0 0 14px; }
+  .md h2 { font-size: 16px; margin: 26px 0 8px; padding-top: 8px; border-top: 1px solid var(--line); }
+  .md h3 { font-size: 14px; margin: 16px 0 6px; }
+  .md code { font-family: var(--mono); font-size: 12.5px; background: var(--code-bg); padding: 1px 4px; border-radius: 3px; }
+  .md pre { background: var(--code-bg); border: 1px solid var(--line); padding: 10px 12px; border-radius: 4px; overflow: auto; }
+  .md pre code { background: none; padding: 0; }
+  .md table { border-collapse: collapse; margin: 10px 0; font-size: 13px; display: block; overflow-x: auto; }
+  .md th, .md td { border: 1px solid var(--line); padding: 6px 9px; text-align: left; vertical-align: top; }
+  .md th { background: #fafbfc; }
+  .md li { margin: 3px 0; }
+
+  .edbar { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-bottom: 1px solid var(--line); background: #fafbfc; flex: none; font-size: 13px; color: var(--muted); }
+  .edbar select { font: inherit; padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); }
+  .saved { margin-left: auto; font-size: 12px; }
+  #editorBox { flex: 1; min-height: 120px; position: relative; background: #fff; }
+  #fallback { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; resize: none; padding: 10px 12px; font: 13px/1.5 var(--mono); outline: none; tab-size: 4; display: none; }
+  #hdivider { height: 6px; cursor: row-resize; background: var(--bg); flex: none; border-top: 1px solid var(--line); }
+  #console { height: 34%; min-height: 90px; display: flex; flex-direction: column; background: var(--panel); }
+  #consoleBody { flex: 1; overflow: auto; display: flex; min-height: 0; }
+  .caselist { width: 190px; border-right: 1px solid var(--line); flex: none; overflow: auto; }
+  .case { padding: 9px 12px; cursor: pointer; border-bottom: 1px solid var(--line); display: flex; gap: 8px; align-items: center; font-size: 13px; }
+  .case.on { background: #eef6f1; }
+  .ok { color: var(--green); font-weight: 700; }
+  .bad { color: var(--red); font-weight: 700; }
+  .casedetail { flex: 1; overflow: auto; padding: 10px 14px; }
+  .lbl { font-size: 12px; color: var(--muted); font-weight: 600; margin: 10px 0 4px; text-transform: uppercase; letter-spacing: .3px; }
+  .lbl:first-child { margin-top: 0; }
+  pre.io { margin: 0; background: var(--code-bg); border: 1px solid var(--line); border-radius: 4px; padding: 8px 10px; font: 12.5px/1.45 var(--mono); max-height: 260px; overflow: auto; white-space: pre; }
+  pre.io.err { color: var(--red); background: #fff5f6; border-color: #f3c6ce; }
+  .diffbad { background: #ffe3e8; }
+  .msg { padding: 14px; color: var(--muted); }
+  .verdict { font-size: 15px; font-weight: 700; margin-bottom: 6px; }
+  .summary { padding: 14px 16px; flex: 1; }
+  .prow { display: grid; grid-template-columns: 70px 1fr 120px; gap: 12px; align-items: center; margin: 8px 0; font-size: 13px; }
+  .bar { height: 8px; background: #edf0f3; border-radius: 4px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--green); }
+  .bar.part > i { background: var(--amber); }
+  .scoreline { margin-top: 12px; font-weight: 600; }
+  .actions { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-top: 1px solid var(--line); background: #fafbfc; flex: none; }
+  .actions label { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; cursor: pointer; user-select: none; }
+  #customInput { width: 100%; height: 100%; min-height: 80px; border: 0; padding: 10px 12px; font: 12.5px/1.45 var(--mono); resize: none; outline: none; }
+  .hint { color: var(--muted); font-size: 12px; }
+  kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; background: #fff; }
+
+  .banner { display: none; padding: 8px 12px; background: #fff7e6; border-bottom: 1px solid #f5d9a8; font-size: 13px; gap: 10px; align-items: center; flex: none; }
+  .banner.show { display: flex; }
+  .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--nav); color: #fff; padding: 9px 16px; border-radius: 6px; font-size: 13px; opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 50; max-width: 90vw; }
+  .toast.show { opacity: 1; }
+  .modal { position: fixed; inset: 0; background: rgba(14,20,30,.55); display: none; align-items: center; justify-content: center; z-index: 40; padding: 16px; }
+  .modal.show { display: flex; }
+  .dialog { background: var(--panel); border-radius: 8px; padding: 20px 22px; width: 460px; max-width: 100%; max-height: 90vh; overflow: auto; }
+  .dialog h3 { margin: 0 0 8px; }
+  .dialog p { color: var(--muted); margin: 0 0 16px; }
+  .dialog .btns { display: flex; justify-content: flex-end; gap: 8px; }
+  .menu { position: relative; }
+  .menu-list { position: absolute; right: 0; top: 40px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.15); display: none; z-index: 30; min-width: 220px; }
+  .menu-list.show { display: block; }
+  .menu-list div { padding: 9px 14px; color: var(--text); cursor: pointer; font-size: 13px; }
+  .menu-list div:hover { background: var(--bg); }
+
+  @media (max-width: 760px) {
+    #drill { flex-direction: column; overflow: auto; }
+    #left { width: 100% !important; min-width: 0; height: 50vh; border-right: 0; }
+    #divider { display: none; }
+    #right { min-width: 0; min-height: 80vh; }
+    .parts, .crumb { display: none; }
+    .caselist { width: 120px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">stripe<b>-</b>prep</div>
+  <div class="crumb" id="crumb"></div>
+  <div class="spacer"></div>
+  <div class="parts" id="parts"></div>
+  <div class="timer" id="timer" style="display:none">--:--</div>
+  <div class="menu" id="drillMenu" style="display:none">
+    <button class="ghost" id="menuBtn">Drill ▾</button>
+    <div class="menu-list" id="menuList">
+      <div data-act="skip">Skip to next part (unsolved)</div>
+      <div data-act="reload">Reload code from disk</div>
+      <div data-act="home">Back to problem list</div>
+      <div data-act="end" style="color:var(--red)">End drill</div>
+    </div>
+  </div>
+</header>
+
+<main id="home">
+  <div class="wrap">
+    <h1 class="page" id="homeTitle">Pick a problem</h1>
+    <p class="sub" id="homeSub">One problem, four stacked parts. Parts unlock one at a time. The clock starts when you click Start.</p>
+    <div class="modes" id="modes">
+      <div class="mode sel" data-mode="oa"><b>OA</b><span>60 minutes</span></div>
+      <div class="mode" data-mode="screen"><b>Team screen</b><span>45 minutes</span></div>
+    </div>
+    <div class="grid" id="grid"></div>
+    <h2 class="sec">History</h2>
+    <div class="tablewrap"><table class="hist" id="hist"></table></div>
+  </div>
+</main>
+
+<section id="drill">
+  <div id="left">
+    <div class="tabs" id="stmtTabs"></div>
+    <div id="statement" class="md"></div>
+  </div>
+  <div id="divider"></div>
+  <div id="right">
+    <div class="banner" id="conflict">
+      <span>solution.py changed on disk (edited in another editor?).</span>
+      <button id="cfReload">Load disk version</button>
+      <button id="cfKeep">Keep editor version</button>
+    </div>
+    <div class="edbar">
+      <select disabled><option>Python 3</option></select>
+      <span class="hint" id="filePath"></span>
+      <span class="saved" id="saved"></span>
+    </div>
+    <div id="editorBox"><textarea id="fallback" spellcheck="false"></textarea></div>
+    <div id="hdivider"></div>
+    <div id="console">
+      <div class="tabs" id="consoleTabs">
+        <div class="tab on" data-tab="results">Test Results</div>
+        <div class="tab" data-tab="custom">Custom Input</div>
+      </div>
+      <div id="consoleBody"><div class="msg">Run your code to see results here.</div></div>
+      <div class="actions">
+        <label><input type="checkbox" id="useCustom"> Test against custom input</label>
+        <span class="hint"><kbd>⌘/Ctrl</kbd>+<kbd>Enter</kbd> run, +<kbd>Shift</kbd> submit</span>
+        <div class="spacer"></div>
+        <button id="nextBtn" class="primary" style="display:none">Next Part →</button>
+        <button id="runBtn">Run Code</button>
+        <button id="submitBtn" class="primary">Submit Code</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="modal" id="modal"><div class="dialog">
+  <h3 id="mTitle"></h3><div id="mBody"></div>
+  <div class="btns" id="mBtns"></div>
+</div></div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const fmt = (s) => { s = Math.max(0, Math.floor(s)); return String(Math.floor(s/60)).padStart(2,"0") + ":" + String(s%60).padStart(2,"0"); };
+const VERDICT = { passed: "Passed", wrong_answer: "Wrong Answer", timeout: "Terminated due to timeout", runtime_error: "Runtime Error", ok: "Success" };
+
+let S = null;            // server state
+let clockOffset = 0;     // server time - local time
+let editor = null;       // monaco instance or null
+let mtime = null;        // disk mtime the editor is based on
+let dirty = false, saving = false, busy = false;
+let mode = "oa", stmtTab = 0, consoleTab = "results", lastConsole = null, selectedCase = 0;
+let customText = "";
+
+async function api(path, body) {
+  const r = await fetch(path, { method: body ? "POST" : "GET", headers: {"Content-Type": "application/json"}, body: body ? JSON.stringify(body) : undefined });
+  const data = await r.json().catch(() => ({ error: "Bad response from server" }));
+  if (!r.ok) { const e = new Error(data.error || r.statusText); e.status = r.status; throw e; }
+  return data;
+}
+function toast(msg, ms = 2600) { const t = $("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), ms); }
+function modal(title, bodyHtml, buttons) {
+  return new Promise(res => {
+    $("mTitle").textContent = title; $("mBody").innerHTML = bodyHtml; $("mBtns").innerHTML = "";
+    buttons.forEach(b => { const el = document.createElement("button"); el.textContent = b.label; if (b.cls) el.className = b.cls;
+      el.onclick = () => { $("modal").classList.remove("show"); res(b.value); }; $("mBtns").appendChild(el); });
+    $("modal").classList.add("show");
+  });
+}
+const md = (text) => window.marked ? marked.parse(text) : "<pre>" + esc(text) + "</pre>";
+
+/* ---------- editor ---------- */
+function getCode() { return editor ? editor.getValue() : $("fallback").value; }
+function setCode(code) {
+  if (editor) { const pos = editor.getPosition(); editor.setValue(code); if (pos) editor.setPosition(pos); }
+  else $("fallback").value = code;
+  dirty = false; showSaved("Saved");
+}
+function showSaved(t) { $("saved").textContent = t; }
+function onEdit() { dirty = true; showSaved("Unsaved"); clearTimeout(onEdit._h); onEdit._h = setTimeout(save, 1200); }
+
+function loadEditor() {
+  const fb = $("fallback");
+  fb.addEventListener("input", onEdit);
+  fb.addEventListener("keydown", e => {
+    if (e.key === "Tab") { e.preventDefault(); const s = fb.selectionStart; fb.setRangeText("    ", s, fb.selectionEnd, "end"); onEdit(); }
+  });
+  const useFallback = () => { if (!editor) { fb.style.display = "block"; if (S && S.active) fb.value = S.code; } };
+  const timeout = setTimeout(useFallback, 8000);
+  const base = "https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/";
+  const s = document.createElement("script");
+  s.src = base + "vs/loader.js";
+  s.onerror = () => { clearTimeout(timeout); useFallback(); };
+  s.onload = () => {
+    window.MonacoEnvironment = { getWorkerUrl: () => "data:text/javascript;charset=utf-8," + encodeURIComponent(
+      `self.MonacoEnvironment={baseUrl:'${base}'};importScripts('${base}vs/base/worker/workerMain.js');`) };
+    require.config({ paths: { vs: base + "vs" } });
+    require(["vs/editor/editor.main"], () => {
+      clearTimeout(timeout);
+      fb.style.display = "none";
+      editor = monaco.editor.create($("editorBox"), {
+        value: fb.value || (S && S.active ? S.code : ""), language: "python", theme: "vs",
+        fontSize: 13.5, minimap: { enabled: false }, automaticLayout: true, tabSize: 4, insertSpaces: true,
+        scrollBeyondLastLine: false, renderWhitespace: "selection", rulers: [],
+        // no autocomplete: the real OA editor is plain
+        quickSuggestions: false, suggestOnTriggerCharacters: false, wordBasedSuggestions: "off",
+        parameterHints: { enabled: false }, snippetSuggestions: "none", acceptSuggestionOnEnter: "off", tabCompletion: "off",
+      });
+      editor.onDidChangeModelContent(() => { if (!editor._muted) onEdit(); });
+      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => run());
+      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter, () => submit());
+      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => save());
+    });
+  };
+  document.head.appendChild(s);
+}
+function setCodeQuiet(code) { if (editor) { editor._muted = true; setCode(code); editor._muted = false; } else setCode(code); }
+
+async function save(opts = {}) {
+  if (!S || !S.active || (!dirty && !opts.force)) return true;
+  if (saving) return true;
+  saving = true; showSaved("Saving…");
+  try {
+    const r = await api("/api/save", { code: getCode(), mtime, overwrite: !!opts.overwrite });
+    mtime = r.mtime; dirty = false; showSaved("Saved"); $("conflict").classList.remove("show"); return true;
+  } catch (e) {
+    if (e.status === 409) { $("conflict").classList.add("show"); showSaved("Conflict"); }
+    else { showSaved("Save failed"); toast(e.message); }
+    return false;
+  } finally { saving = false; }
+}
+function codeBody(extra = {}) { return { code: getCode(), mtime, ...extra }; }
+
+/* ---------- views ---------- */
+async function showHome() {
+  $("drill").style.display = "none"; $("home").style.display = "block";
+  $("timer").style.display = "none"; $("parts").innerHTML = ""; $("drillMenu").style.display = "none";
+  const [{ problems }, { history }] = await Promise.all([api("/api/problems"), api("/api/history")]);
+  $("crumb").innerHTML = S && S.active ? `Active drill: <strong>${esc(S.title)}</strong> <a href="#" id="resume" style="color:#6fdc96">resume</a>` : "";
+  if ($("resume")) $("resume").onclick = (e) => { e.preventDefault(); showDrill(); };
+  $("grid").innerHTML = problems.map(p => `
+    <div class="card">
+      <div class="id">${esc(p.id)} · ${p.parts} parts · ${esc(p.function)}</div>
+      <h3>${esc(p.title)}</h3>
+      <p>${esc(p.summary)}</p>
+      <div class="row"><span class="best ${p.best ? "has" : ""}">${p.best ? "Best " + esc(p.best) : "Not attempted"}</span>
+      <button class="primary" data-start="${esc(p.id)}">Start</button></div>
+    </div>`).join("");
+  $("grid").querySelectorAll("[data-start]").forEach(b => b.onclick = () => start(b.dataset.start));
+  const rows = history.slice().reverse();
+  $("hist").innerHTML = rows.length ? `<tr><th>Date</th><th>Problem</th><th>Mode</th><th>Parts</th><th>Total</th><th>Per part (spent / solved after)</th></tr>` +
+    rows.map(h => `<tr><td>${esc(h.date.replace("T", " "))}</td><td>${esc(h.title)}</td><td>${esc(h.mode)}</td>
+      <td>${h.parts_solved}/${h.parts}</td><td>${fmt(h.total_seconds)}</td>
+      <td>${h.splits.map(s => `P${s.part} ${fmt(s.spent)}${s.solved_after != null ? " / " + fmt(s.solved_after) : " ✗"}`).join(" · ")}</td></tr>`).join("")
+    : `<tr><td class="msg">No drills logged yet.</td></tr>`;
+}
+
+async function start(id) {
+  let force = false;
+  if (S && S.active) {
+    const ok = await modal("Discard the active drill?", `<p>${esc(S.title)} is still running. Starting a new drill discards it without logging. End it from the Drill menu if you want it logged.</p>`,
+      [{ label: "Cancel", value: false }, { label: "Discard and start", value: true, cls: "primary" }]);
+    if (!ok) return;
+    force = true;
+  }
+  try { S = await api("/api/start", { id, mode, force }); applyState(true); }
+  catch (e) { toast(e.message); }
+}
+
+function applyState(resetEditor) {
+  clockOffset = S.now - Date.now() / 1000;
+  if (resetEditor || !dirty) { setCodeQuiet(S.code); mtime = S.mtime; }
+  stmtTab = S.part - 1;
+  showDrill();
+}
+
+function showDrill() {
+  if (!S || !S.active) return showHome();
+  $("home").style.display = "none"; $("drill").style.display = "flex";
+  $("timer").style.display = "block"; $("drillMenu").style.display = "block";
+  $("crumb").innerHTML = `<strong>${esc(S.title)}</strong> · ${S.mode === "oa" ? "OA 60 min" : "Team screen 45 min"}`;
+  $("filePath").textContent = S.attempt + "/solution.py";
+  renderParts(); renderStatement(); renderConsole();
+  if (editor) editor.layout();
+}
+
+function renderParts() {
+  const solved = new Set(S.splits.filter(s => s.solved_after != null).map(s => s.part));
+  let h = "";
+  for (let p = 1; p <= S.parts; p++) {
+    const cls = p > S.part ? "locked" : solved.has(p) ? "done" : p === S.part ? "cur" : "";
+    h += `<span class="pill ${cls}">${p > S.part ? "🔒 " : solved.has(p) ? "✓ " : ""}Part ${p}</span>`;
+  }
+  $("parts").innerHTML = h;
+  const cleared = solved.has(S.part);
+  $("nextBtn").style.display = cleared && S.part < S.parts ? "inline-block" : "none";
+}
+
+function renderStatement() {
+  $("stmtTabs").innerHTML = S.statements.map((_, i) => `<div class="tab ${i === stmtTab ? "on" : ""}" data-i="${i}">Part ${i + 1}</div>`).join("");
+  $("stmtTabs").querySelectorAll(".tab").forEach(t => t.onclick = () => { stmtTab = +t.dataset.i; renderStatement(); });
+  $("statement").innerHTML = md(S.statements[stmtTab]);
+  $("statement").scrollTop = 0;
+}
+
+/* ---------- timer ---------- */
+setInterval(() => {
+  if (!S || !S.active) return;
+  const rem = S.deadline - (Date.now() / 1000 + clockOffset);
+  const t = $("timer");
+  t.textContent = rem >= 0 ? fmt(rem) : "+" + fmt(-rem);
+  t.className = "timer" + (rem < 0 ? " over" : rem < 300 ? " crit" : rem < 900 ? " warn" : "");
+  t.title = rem < 0 ? "Time is up" : "Time left";
+}, 250);
+
+/* ---------- console ---------- */
+document.querySelectorAll("#consoleTabs .tab").forEach(t => t.onclick = () => {
+  consoleTab = t.dataset.tab;
+  document.querySelectorAll("#consoleTabs .tab").forEach(x => x.classList.toggle("on", x === t));
+  if (consoleTab === "custom") $("useCustom").checked = true;
+  renderConsole();
+});
+$("useCustom").onchange = () => { if ($("useCustom").checked) { consoleTab = "custom"; } else if (consoleTab === "custom") { consoleTab = "results"; }
+  document.querySelectorAll("#consoleTabs .tab").forEach(x => x.classList.toggle("on", x.dataset.tab === consoleTab)); renderConsole(); };
+
+function renderConsole() {
+  const body = $("consoleBody");
+  if (consoleTab === "custom") {
+    body.innerHTML = `<textarea id="customInput" spellcheck="false" placeholder="First line: n. Then n command lines.">${esc(customText)}</textarea>`;
+    $("customInput").oninput = (e) => { customText = e.target.value; };
+    return;
+  }
+  const c = lastConsole;
+  if (!c) { body.innerHTML = `<div class="msg">Run your code to see results here.</div>`; return; }
+  if (c.kind === "busy") { body.innerHTML = `<div class="msg">${esc(c.text)}</div>`; return; }
+  if (c.kind === "error") { body.innerHTML = `<div class="casedetail"><pre class="io err">${esc(c.text)}</pre></div>`; return; }
+  if (c.kind === "samples") {
+    const cs = c.data;
+    const passed = cs.filter(x => x.verdict === "passed").length;
+    selectedCase = Math.min(selectedCase, cs.length - 1);
+    const x = cs[selectedCase];
+    const exp = x.expected.replace(/\n$/, "").split("\n"), got = x.output.replace(/\n$/, "").split("\n");
+    const gotHtml = x.output.trim() === "" ? "~ no response on stdout ~" :
+      got.map((l, i) => (x.verdict === "wrong_answer" && (l.trimEnd() !== (exp[i] ?? "").trimEnd())) ? `<span class="diffbad">${esc(l) || " "}</span>` : esc(l)).join("\n");
+    body.innerHTML = `
+      <div class="caselist">${cs.map((s, i) => `<div class="case ${i === selectedCase ? "on" : ""}" data-i="${i}">
+        <span class="${s.verdict === "passed" ? "ok" : "bad"}">${s.verdict === "passed" ? "✓" : "✗"}</span>Sample Test case ${s.index}</div>`).join("")}
+        <div class="msg" style="font-size:12px">${passed}/${cs.length} sample cases passed</div></div>
+      <div class="casedetail">
+        <div class="verdict ${x.verdict === "passed" ? "ok" : "bad"}">${VERDICT[x.verdict]}</div>
+        ${x.stderr && x.stderr.trim() ? `<div class="lbl">Error (stderr)</div><pre class="io err">${esc(x.stderr)}</pre>` : ""}
+        <div class="lbl">Input (stdin)</div><pre class="io">${esc(x.input.replace(/\n$/, ""))}</pre>
+        <div class="lbl">Your Output (stdout)</div><pre class="io">${gotHtml}</pre>
+        <div class="lbl">Expected Output</div><pre class="io">${esc(x.expected.replace(/\n$/, ""))}</pre>
+      </div>`;
+    body.querySelectorAll(".case").forEach(el => el.onclick = () => { selectedCase = +el.dataset.i; renderConsole(); });
+    return;
+  }
+  if (c.kind === "custom") {
+    const x = c.data;
+    body.innerHTML = `<div class="casedetail">
+      <div class="verdict ${x.verdict === "ok" ? "ok" : "bad"}">${VERDICT[x.verdict]}</div>
+      ${x.stderr && x.stderr.trim() ? `<div class="lbl">Error (stderr)</div><pre class="io err">${esc(x.stderr)}</pre>` : ""}
+      <div class="lbl">Your Output (stdout)</div><pre class="io">${esc(x.output.replace(/\n$/, "")) || "~ no response on stdout ~"}</pre></div>`;
+    return;
+  }
+  if (c.kind === "submit") {
+    const r = c.data; let tp = 0, tt = 0;
+    const rows = Object.entries(r.results).map(([p, t]) => {
+      tp += t.passed; tt += t.total;
+      const extra = [["wrong_answer", "wrong"], ["runtime_error", "runtime err"], ["timeout", "timeout"]].filter(([k]) => t[k]).map(([k, n]) => `${t[k]} ${n}`).join(", ");
+      const pct = t.total ? 100 * t.passed / t.total : 0;
+      return `<div class="prow"><b>Part ${p}</b><div class="bar ${pct < 100 ? "part" : ""}"><i style="width:${pct}%"></i></div>
+        <span>${t.passed}/${t.total} passed${extra ? `<br><span class="hint">${extra}</span>` : ""}</span></div>`;
+    }).join("");
+    const msg = r.cleared ? (r.part < r.parts ? `Part ${r.part} cleared. Unlock Part ${r.part + 1} with Next Part.` : "All parts cleared. End the drill from the Drill menu to log it.")
+      : `Part ${r.part} not cleared yet. Hidden test details are not shown, as on HackerRank.`;
+    body.innerHTML = `<div class="summary">${rows}<div class="scoreline">Total ${tp}/${tt} · Score ${(100 * tp / tt).toFixed(1)}</div>
+      <div class="hint" style="margin-top:6px">${msg}</div></div>`;
+  }
+}
+
+function setBusy(b, text) {
+  busy = b; ["runBtn", "submitBtn", "nextBtn"].forEach(id => $(id).disabled = b);
+  if (b) { lastConsole = { kind: "busy", text }; if (consoleTab !== "results") selectResultsTab(); renderConsole(); }
+}
+function selectResultsTab() { consoleTab = "results"; document.querySelectorAll("#consoleTabs .tab").forEach(x => x.classList.toggle("on", x.dataset.tab === "results")); }
+
+async function guarded(fn) {
+  if (busy || !S || !S.active) return;
+  if ($("conflict").classList.contains("show")) { toast("Resolve the disk conflict first."); return; }
+  try { await fn(); }
+  catch (e) {
+    if (e.status === 409) { $("conflict").classList.add("show"); lastConsole = null; }
+    else lastConsole = { kind: "error", text: e.message };
+    renderConsole();
+  } finally { setBusy(false); }
+}
+
+async function run() {
+  await guarded(async () => {
+    const custom = $("useCustom").checked;
+    setBusy(true, custom ? "Running with custom input…" : "Running sample test cases…");
+    const r = await api("/api/run", codeBody(custom ? { custom: customText.endsWith("\n") ? customText : customText + "\n" } : {}));
+    mtime = r.mtime; dirty = false; showSaved("Saved");
+    lastConsole = custom ? { kind: "custom", data: r.custom } : { kind: "samples", data: r.samples };
+    selectedCase = custom ? 0 : Math.max(0, r.samples.findIndex(x => x.verdict !== "passed"));
+    selectResultsTab(); renderConsole();
+  });
+}
+async function submit() {
+  await guarded(async () => {
+    setBusy(true, "Submitting… running hidden test cases for every unlocked part.");
+    const r = await api("/api/submit", codeBody());
+    mtime = r.mtime; dirty = false; showSaved("Saved");
+    lastConsole = { kind: "submit", data: r };
+    const st = await api("/api/state"); S = st; clockOffset = S.now - Date.now() / 1000;
+    renderParts(); selectResultsTab(); renderConsole();
+  });
+}
+async function nextPart(force) {
+  if (force) {
+    const ok = await modal("Skip to the next part?", `<p>Part ${S.part} is not cleared. In the real OA, failing tests stay failed. Your time on this part gets logged as unsolved.</p>`,
+      [{ label: "Cancel", value: false }, { label: "Skip", value: true, cls: "primary" }]);
+    if (!ok) return;
+  }
+  await guarded(async () => {
+    setBusy(true, "Checking current part…");
+    S = await api("/api/next", codeBody({ force: !!force }));
+    mtime = S.mtime; dirty = false;
+    lastConsole = null; applyState(false);
+    toast(`Part ${S.part} unlocked`);
+  });
+}
+async function endDrill() {
+  const ok = await modal("End the drill?", `<p>This runs a final submit, stops the clock and logs your per-part times.</p>`,
+    [{ label: "Cancel", value: false }, { label: "End drill", value: true, cls: "primary" }]);
+  if (!ok) return;
+  await guarded(async () => {
+    setBusy(true, "Final submit…");
+    const { entry } = await api("/api/end", codeBody());
+    S = { active: false };
+    const rows = entry.splits.map(s => `<div class="prow"><b>Part ${s.part}</b><span>${fmt(s.spent)} spent</span><span>${s.solved_after != null ? "solved after " + fmt(s.solved_after) : "not solved"}</span></div>`).join("");
+    const fin = Object.entries(entry.final).map(([p, f]) => `P${p} ${f.passed}/${f.total}`).join(" · ");
+    await modal(`${entry.title}: ${entry.parts_solved}/${entry.parts} parts`, `<p>Total ${fmt(entry.total_seconds)} of ${fmt(entry.limit_seconds)} · ${entry.submits} submits</p>${rows}<p style="margin-top:10px">Final: ${fin}</p>`,
+      [{ label: "Done", value: true, cls: "primary" }]);
+    lastConsole = null; showHome();
+  });
+}
+
+$("runBtn").onclick = run;
+$("submitBtn").onclick = submit;
+$("nextBtn").onclick = () => nextPart(false);
+$("menuBtn").onclick = (e) => { e.stopPropagation(); $("menuList").classList.toggle("show"); };
+document.addEventListener("click", () => $("menuList").classList.remove("show"));
+$("menuList").onclick = async (e) => {
+  const act = e.target.dataset.act; $("menuList").classList.remove("show");
+  if (act === "skip") { if (S.part >= S.parts) toast("Already on the last part."); else nextPart(true); }
+  if (act === "end") endDrill();
+  if (act === "home") { await save(); showHome(); }
+  if (act === "reload") { const st = await api("/api/state"); S = st; setCodeQuiet(S.code); mtime = S.mtime; $("conflict").classList.remove("show"); toast("Loaded solution.py from disk"); }
+};
+$("cfReload").onclick = async () => { const st = await api("/api/state"); S = st; setCodeQuiet(S.code); mtime = S.mtime; $("conflict").classList.remove("show"); };
+$("cfKeep").onclick = async () => { if (await save({ force: true, overwrite: true })) toast("Editor version saved to disk"); };
+document.querySelectorAll(".mode").forEach(m => m.onclick = () => { mode = m.dataset.mode; document.querySelectorAll(".mode").forEach(x => x.classList.toggle("sel", x === m)); });
+document.addEventListener("keydown", (e) => {
+  if (!(e.metaKey || e.ctrlKey) || !S || !S.active || $("drill").style.display === "none") return;
+  if (e.key === "Enter") { e.preventDefault(); e.shiftKey ? submit() : run(); }
+  if (e.key === "s") { e.preventDefault(); save({ force: true }); }
+});
+window.addEventListener("beforeunload", () => { if (dirty) navigator.sendBeacon && navigator.sendBeacon("/api/save", new Blob([JSON.stringify(codeBody())], { type: "application/json" })); });
+
+/* resizable panes */
+function dragger(el, onMove) {
+  el.addEventListener("mousedown", (e) => {
+    e.preventDefault(); document.body.style.userSelect = "none";
+    const move = (ev) => onMove(ev);
+    const up = () => { document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); document.body.style.userSelect = ""; };
+    document.addEventListener("mousemove", move); document.addEventListener("mouseup", up);
+  });
+}
+dragger($("divider"), (e) => { const w = Math.min(Math.max(e.clientX, 280), window.innerWidth - 340); $("left").style.width = w + "px"; });
+dragger($("hdivider"), (e) => { const r = $("right").getBoundingClientRect(); const h = Math.min(Math.max(r.bottom - e.clientY, 90), r.height - 140); $("console").style.height = h + "px"; });
+
+/* poll for drill changes made from the CLI (next/end/start in a terminal) */
+setInterval(async () => {
+  if (busy) return;
+  try {
+    const st = await api("/api/state");
+    if (!S) return;
+    const changed = st.active !== S.active || (st.active && (st.problem !== S.problem || st.part !== S.part || st.started !== S.started));
+    if (changed) { S = st; if (S.active) applyState(true); else showHome(); return; }
+    if (st.active && !dirty && !saving && Math.abs(st.mtime - mtime) > 1e-6) { setCodeQuiet(st.code); mtime = st.mtime; }
+    if (st.active) { S.splits = st.splits; renderParts(); }
+  } catch (e) { /* server stopped */ }
+}, 4000);
+
+(async function init() {
+  loadEditor();
+  try { S = await api("/api/state"); } catch (e) { toast("Cannot reach the drill server"); return; }
+  if (S.active) applyState(true); else showHome();
+})();
+</script>
+</body>
+</html>

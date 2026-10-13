@@ -10,7 +10,22 @@ No solutions or hints live in this repo.
 
 Python 3.10+. Stdlib only. No install step.
 
-## Drill loop
+## Web UI (recommended)
+
+```bash
+./drill serve                        # opens http://localhost:8000
+```
+
+This works like the HackerRank screen. The statement is on the left with one tab per unlocked part, and
+the editor is on the right. Below the editor are Run Code, Submit Code, a custom input tab and the timer.
+The editor has autocomplete turned off. Use `Cmd/Ctrl+Enter` to run and `Cmd/Ctrl+Shift+Enter` to submit.
+Your code autosaves to the same `solution.py` that the CLI uses, and an edit made on disk in another
+editor shows up in the page. The editor and markdown load from a CDN. With no internet the page falls
+back to a plain textarea.
+
+The CLI below does the same things from a terminal.
+
+## Drill loop (CLI)
 
 ```bash
 ./drill list                         # 10 problems + your best times
@@ -64,7 +79,8 @@ Part 1. The statement is also saved next to your solution. Edit only the functio
 ## Layout
 
 ```
-drill                     CLI (single file)
+drill                     CLI + web server (single file, stdlib)
+web/index.html            HackerRank-style UI
 problems/NN_slug/
   meta.json               title, parts, function name
   part1.md                Part 1 statement (later parts are in .vault)
